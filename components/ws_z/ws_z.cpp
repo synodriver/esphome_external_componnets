@@ -74,17 +74,46 @@ void DARTWSZComponent::update() {
 }
 
 void DARTWSZComponent::loop() {
-  uint16_t ch20h_ppb = 0;
   if (this->mode_ == DARTWS_MODE_ACTIVE) {
     while (this->available()) {
-      this->buffer.push_back((uint8_t)this->read());
-    }
-    if(this->buffer.size() >= DART_RESPONSE_LENGTH) {
-      ch20h_ppb = uint16_t(this->buffer[4]) * 256 + this->buffer[5];
-      if(this->formaldehyde_ppb_sensor_ != nullptr ) {
-        this->formaldehyde_ppb_sensor_->publish_state(ch20h_ppb);
+      uint8_t c;
+      if (!this->read_byte(&c)) {
+        return;
       }
-      this->buffer.erase(this->buffer.begin(), this->buffer.begin() + DART_RESPONSE_LENGTH);
+      // 寻找 0xFF 帧头
+      if (c != 0xFF) {
+        continue;
+      }
+
+      // 找到帧头后，读取后续的8个字节数据
+      uint8_t data[8];
+      if (!this->read_array(data, 8)) {
+        return;
+      }
+
+      // 校验和检查
+      uint8_t sum = 0;
+      for (int i = 0; i < 8; i++) {
+        sum += data[i];
+      }
+
+      if (sum != 0) {
+        // 校验失败的数据包直接丢弃
+        ESP_LOGW(TAG, "Checksum failed! Discarding packet. Sum: 0x%02X", sum);
+        continue;
+      }
+
+      // 检查 甲醛ID(0x17) 和 Ppb单位(0x04)
+      if (data[0] == 0x17 && data[1] == 0x04) {
+        // 浓度值位置在第4和第5字节 (数组索引为 data[3] 和 data[4])
+        uint32_t val = (uint32_t(data[3]) << 8) | uint32_t(data[4]);
+        if (this->formaldehyde_ppb_sensor_ != nullptr) {
+          this->formaldehyde_ppb_sensor_->publish_state(val);
+        }
+      } else {
+        // 如果收到其他ID或单位的数据，也记录下来
+        ESP_LOGW(TAG, "Ignoring frame with unknown ID/Unit. ID: 0x%02X, Unit: 0x02X", data[0], data[1]);
+      }
     }
   }
 }
